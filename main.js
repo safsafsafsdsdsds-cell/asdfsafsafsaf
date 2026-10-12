@@ -27,7 +27,7 @@ const {
 } = require("@discordjs/voice");
 
 const { spawn, spawnSync } = require("child_process");
-const { existsSync } = require("fs");
+const { existsSync, writeFileSync } = require("fs");
 const path = require("path");
 const yts = require("yt-search");
 
@@ -61,13 +61,13 @@ const MUSIC_CONFIG = {
 };
 
 // ─── ค้นหาเพลง ───
-const SEARCH_PAGE_SIZE   = 10;   // Discord select menu limit = 25
-const SEARCH_MAX_RESULTS = 100;  // ดึงจาก yt-search สูงสุด 100
-const MENU_EMOJI = { id: "1457664481466257479", name: "prettyarrowr", animated: true }; 
-const PREV_EMOJI = { id: "1457663782376575016", name: "arrow", animated: true };        
-const NEXT_EMOJI = { id: "1457663782376575016", name: "arrow", animated: true };         
+const SEARCH_PAGE_SIZE   = 10;
+const SEARCH_MAX_RESULTS = 100;
+const MENU_EMOJI = { id: "1457664481466257479", name: "prettyarrowr", animated: true };
+const PREV_EMOJI = { id: "1457663782376575016", name: "arrow", animated: true };
+const NEXT_EMOJI = { id: "1457663782376575016", name: "arrow", animated: true };
 
-// ─── Helper: ตอบกลับแบบ V2 (กันลืมใส่ flags) ───
+// ─── Helper: ตอบกลับแบบ V2 ───
 function v2Reply(interaction, containerObj) {
   return interaction.reply({
     flags: FLAGS.V2_EPHEMERAL,
@@ -104,6 +104,22 @@ const FFMPEG_CMD = findBinary("ffmpeg");
 
 console.log(`\n🔍 yt-dlp : ${YTDLP_CMD || "❌ ไม่พบ"}`);
 console.log(`🔍 ffmpeg : ${FFMPEG_CMD || "❌ ไม่พบ"}\n`);
+
+// ─── Cookie setup สำหรับ yt-dlp ───
+let COOKIE_PATH = null;
+if (process.env.YTDLP_COOKIES) {
+  try {
+    const cookieData = Buffer.from(process.env.YTDLP_COOKIES, "base64").toString("utf-8");
+    COOKIE_PATH = path.join("/tmp", "yt-cookies.txt");
+    writeFileSync(COOKIE_PATH, cookieData);
+    console.log("🍪 Cookie: โหลดสำเร็จ\n");
+  } catch (e) {
+    console.warn("⚠️ Cookie: โหลดไม่สำเร็จ —", e.message);
+    COOKIE_PATH = null;
+  }
+} else {
+  console.log("🍪 Cookie: ไม่ได้ตั้งค่า (จะโดน YouTube block ได้)\n");
+}
 
 const client = new Client({
   intents: [
@@ -500,7 +516,11 @@ function startProgressUpdater(queue) {
 function getYtdlpInfo(url) {
   return new Promise((resolve) => {
     if (!YTDLP_CMD) return resolve(null);
-    const proc = spawn(YTDLP_CMD, ["-J", "--no-playlist", "--no-warnings", url], {
+    const args = ["-J", "--no-playlist", "--no-warnings"];
+    if (COOKIE_PATH) args.push("--cookies", COOKIE_PATH);
+    args.push(url);
+
+    const proc = spawn(YTDLP_CMD, args, {
       stdio: ["ignore", "pipe", "pipe"],
     });
     if (!proc.stdout) return resolve(null);
@@ -567,17 +587,36 @@ async function searchTracks(query, requester) {
   }
 }
 
+// ─── สร้าง stream จาก yt-dlp + ffmpeg ───
 function createYtdlpStream(url) {
   if (!YTDLP_CMD || !FFMPEG_CMD) throw new Error("yt-dlp หรือ ffmpeg ไม่พร้อมใช้งาน");
 
-  const ytdlp = spawn(YTDLP_CMD, [
-    "-f", "bestaudio", "-o", "-",
-    "--no-playlist", "--quiet", "--no-warnings", url,
-  ], { stdio: ["ignore", "pipe", "pipe"] });
+  const ytdlpArgs = [
+    "-f", "bestaudio/best",
+    "-o", "-",
+    "--no-playlist",
+    "--no-warnings",
+    "--no-check-certificates",
+    "--extractor-args", "youtube:player_client=android,web,tv",
+    "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  ];
+
+  if (COOKIE_PATH) ytdlpArgs.push("--cookies", COOKIE_PATH);
+  ytdlpArgs.push(url);
+
+  console.log("🎬 yt-dlp เริ่ม:", url);
+
+  const ytdlp = spawn(YTDLP_CMD, ytdlpArgs, { stdio: ["ignore", "pipe", "pipe"] });
 
   const ffmpeg = spawn(FFMPEG_CMD, [
-    "-i", "pipe:0", "-analyzeduration", "0", "-loglevel", "0",
-    "-acodec", "libopus", "-f", "ogg", "-ar", "48000", "-ac", "2", "pipe:1",
+    "-i", "pipe:0",
+    "-analyzeduration", "0",
+    "-loglevel", "0",
+    "-acodec", "libopus",
+    "-f", "ogg",
+    "-ar", "48000",
+    "-ac", "2",
+    "pipe:1",
   ], { stdio: ["pipe", "pipe", "pipe"] });
 
   if (!ytdlp.stdout || !ffmpeg.stdin || !ffmpeg.stdout) {
@@ -587,11 +626,30 @@ function createYtdlpStream(url) {
   }
 
   ytdlp.stdout.pipe(ffmpeg.stdin);
+
+  let ytdlpErr = "";
+  let ffmpegErr = "";
+  ytdlp.stderr?.on("data", (c) => {
+    ytdlpErr += c.toString();
+    if (ytdlpErr.length > 2000) ytdlpErr = ytdlpErr.slice(-2000);
+  });
+  ffmpeg.stderr?.on("data", (c) => {
+    ffmpegErr += c.toString();
+    if (ffmpegErr.length > 2000) ffmpegErr = ffmpegErr.slice(-2000);
+  });
+
   ytdlp.on("error", (e) => console.error("❌ yt-dlp error:", e.message));
   ffmpeg.on("error", (e) => console.error("❌ ffmpeg error:", e.message));
 
-  let stallTimer = null;
+  ytdlp.on("close", (code) => {
+    try { ffmpeg.stdin.end(); } catch {}
+    if (code !== 0) {
+      console.error(`❌ yt-dlp exit code ${code}`);
+      console.error(`❌ yt-dlp stderr:\n${ytdlpErr.slice(-1000)}`);
+    }
+  });
 
+  let stallTimer = null;
   let cleaned = false;
   const cleanup = () => {
     if (cleaned) return;
@@ -601,13 +659,19 @@ function createYtdlpStream(url) {
     try { ytdlp.kill(); } catch {}
     try { ffmpeg.kill(); } catch {}
   };
-  ytdlp.on("close", () => { try { ffmpeg.stdin.end(); } catch {} });
-  ffmpeg.on("close", cleanup);
+  ffmpeg.on("close", (code) => {
+    if (code !== 0) {
+      console.error(`❌ ffmpeg exit code ${code}`);
+      console.error(`❌ ffmpeg stderr:\n${ffmpegErr.slice(-1000)}`);
+    }
+    cleanup();
+  });
   ffmpeg.stdout.on("close", cleanup);
   ffmpeg.stdout.on("error", cleanup);
 
   stallTimer = setTimeout(() => {
-    console.error("❌ Stream stall: yt-dlp ไม่ส่งข้อมูลภายใน 60s — kill");
+    console.error("❌ Stream stall: ไม่มีข้อมูลใน 60s — kill");
+    console.error(`   yt-dlp stderr: ${ytdlpErr.slice(-500)}`);
     cleanup();
     try { ffmpeg.stdout.destroy(); } catch {}
   }, 60_000);
@@ -879,7 +943,7 @@ async function handleSetup(interaction) {
 
 client.on(Events.InteractionCreate, async (interaction) => {
   const guildId = interaction.guildId;
-  if (!guildId) return; 
+  if (!guildId) return;
 
   if (interaction.isChatInputCommand() && interaction.commandName === "setup") {
     return handleSetup(interaction);
