@@ -1,0 +1,22 @@
+{
+  "name": "discord-music-bot",
+  "version": "1.0.0",
+  "description": "Discord music bot using Lavalink",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@discordjs/opus": "^0.10.0",
+    "@discordjs/voice": "^0.19.2",
+    "discord.js": "^14.27.0",
+    "dotenv": "^16.6.1",
+    "libsodium-wrappers": "^0.8.4",
+    "shoukaku": "^4.1.1",
+    "youtube-po-token-generator": "^0.6.0",
+    "yt-search": "^2.13.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
