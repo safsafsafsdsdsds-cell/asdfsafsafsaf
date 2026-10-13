@@ -827,7 +827,50 @@ function attachPlayerEvents(guildId, player, connection) {
   queue.player     = player;
   queue.connection = connection;
 
-  connection.on("stateChange", (o, n) => console.log(`[voice]  ${o.status} -> ${n.status}`));
+  // Watchdog: ถ้าเคย Ready แล้วหลุดไป connecting/signalling แล้วไม่กลับมาใน 15 วิ
+  // → ลอง rejoin 1 ครั้ง → ถ้ายังไม่กลับมา ปิดคิวและลบการ์ด (กันการ์ดค้างตอน player autopaused)
+  let voiceWatchdog = null;
+  let wasReady = false;
+  let rejoinTried = false;
+  const clearWatchdog = () => {
+    if (voiceWatchdog) { clearTimeout(voiceWatchdog); voiceWatchdog = null; }
+  };
+  const armWatchdog = () => {
+    clearWatchdog();
+    voiceWatchdog = setTimeout(() => {
+      voiceWatchdog = null;
+      const st = connection.state.status;
+      if (st === VoiceConnectionStatus.Ready || st === VoiceConnectionStatus.Destroyed) return;
+      if (!rejoinTried) {
+        rejoinTried = true;
+        console.error(`⚠️ Voice ค้างที่ ${st} นาน 15s — ลอง rejoin`);
+        try { connection.rejoin(); } catch (e) { console.error("rejoin error:", e.message); }
+        armWatchdog();
+      } else {
+        console.error(`❌ Voice ไม่กลับมา Ready (ค้างที่ ${st}) — ปิดคิว`);
+        if (queue.textChannel) {
+          queue.textChannel.send({
+            flags: FLAGS.V2,
+            components: [msgCard("- `❌` **การเชื่อมต่อห้องเสียงหลุด — หยุดเล่นแล้ว กรุณาค้นหาเพลงใหม่**")],
+          }).catch(() => {});
+        }
+        shutdown(guildId, queue);
+      }
+    }, 15_000);
+  };
+
+  connection.on("stateChange", (o, n) => {
+    console.log(`[voice]  ${o.status} -> ${n.status}`);
+    if (n.status === VoiceConnectionStatus.Ready) {
+      wasReady = true;
+      rejoinTried = false;
+      clearWatchdog();
+    } else if (n.status === VoiceConnectionStatus.Destroyed) {
+      clearWatchdog();
+    } else if (wasReady && n.status !== VoiceConnectionStatus.Disconnected && !voiceWatchdog) {
+      armWatchdog();
+    }
+  });
   connection.on("error", (e) => console.error("[voice] error:", e.message));
   player.on("stateChange", (o, n) => console.log(`[player] ${o.status} -> ${n.status}`));
 
