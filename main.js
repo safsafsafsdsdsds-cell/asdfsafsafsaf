@@ -15,6 +15,7 @@ const {
   MessageFlags,
   ChannelType,
   PermissionFlagsBits,
+  ActivityType,
 } = require("discord.js");
 
 const {
@@ -64,7 +65,7 @@ const MUSIC_CONFIG = {
 
 const SEARCH_PAGE_SIZE   = 10;
 const PENDING_SEARCH_TTL = 5 * 60 * 1000;
-const STARTUP_TIMEOUT    = 60_000; // รอข้อมูลเสียงก้อนแรกไม่เกิน 60 วิ
+const STARTUP_TIMEOUT    = 60_000; 
 const VOICE_READY_TIMEOUT = 20_000;
 
 const MENU_EMOJI = { id: "1457664481466257479", name: "prettyarrowr", animated: true };
@@ -101,14 +102,7 @@ if (YTDLP_CMD) {
   console.log(`🔍 yt-dlp version : ${(v.stdout || "").trim() || "?"}`);
 }
 
-// รายงาน dependency ของระบบเสียง (opus / sodium / davey) — ดูใน Deploy Logs
 console.log("\n" + generateDependencyReport() + "\n");
-
-// ───────────────────────── Cookies / proxy ─────────────────────────
-
-// รองรับ cookies 3 แบบ: YTDLP_COOKIES_B64 (base64 ใน Railway Variables),
-// YTDLP_COOKIES_FILE (path) หรือไฟล์ cookies.txt ข้างๆ index.js
-// คัดลอกไป tmp เสมอ เพราะ yt-dlp พยายามเขียนทับไฟล์ cookies
 function resolveCookiesPath() {
   try {
     const dest = path.join(os.tmpdir(), "yt-cookies.txt");
@@ -131,9 +125,6 @@ const COOKIES_PATH = resolveCookiesPath();
 console.log(`🍪 cookies : ${COOKIES_PATH ? "ใช้งาน" : "ไม่มี"}`);
 
 function ytdlpBaseArgs() {
-  // ไม่ใส่ --no-warnings เพื่อให้เห็นคำเตือนของ yt-dlp ใน log (เช่น ไม่มี JS runtime)
-  // --js-runtimes node: YouTube ต้องใช้ JS runtime แก้โจทย์ (yt-dlp เปิดแค่ deno เป็นค่าเริ่มต้น)
-  // ปิดได้ด้วยตั้ง YTDLP_NO_JS_RUNTIME=1
   const args = ["--no-playlist", "--no-cache-dir", "--no-progress"];
   if (!process.env.YTDLP_NO_JS_RUNTIME) args.push("--js-runtimes", "node");
   if (COOKIES_PATH) args.push("--cookies", COOKIES_PATH);
@@ -142,14 +133,18 @@ function ytdlpBaseArgs() {
   return args;
 }
 
-// ───────────────────────── Client ─────────────────────────
+try {
+  const { DefaultWebSocketManagerOptions } = require("@discordjs/ws");
+  DefaultWebSocketManagerOptions.identifyProperties.browser = "Discord iOS";
+  DefaultWebSocketManagerOptions.identifyProperties.os      = "iOS";
+  DefaultWebSocketManagerOptions.identifyProperties.device  = "iOS";
+} catch (e) {
+  console.warn("⚠️ ตั้งค่า identifyProperties ไม่สำเร็จ:", e.message);
+}
 
-// ไม่ใช้ MessageContent / GuildMessages (ไม่จำเป็น และถ้าไม่ได้เปิด intent ใน Developer Portal บอทจะล็อกอินไม่ได้)
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates],
 });
-
-// ───────────────────────── Queue ─────────────────────────
 
 class MusicQueue {
   constructor(guildId) {
@@ -188,7 +183,6 @@ class MusicQueue {
   get current()  { return this.songs[this.currentIdx] || null; }
   get upcoming() { return this.songs.slice(this.currentIdx + 1); }
 
-  // force = true: ข้ามการลูปเพลงเดียว (ใช้ตอนกด skip / เพลงพัง)
   next(force = false) {
     if (this.loop && !force) return this.songs[this.currentIdx] || null;
     if (this.loopQueue && this.songs.length > 0) {
@@ -236,8 +230,6 @@ function getQueue(guildId) {
   return queues.get(guildId);
 }
 
-// ───────────────────────── Pending search (แยกตามผู้ใช้) ─────────────────────────
-
 const pendingSearch = new Map();
 const pKey = (guildId, userId) => `${guildId}:${userId}`;
 
@@ -258,8 +250,6 @@ function clearPendingSearch(key) {
   if (cur?._timer) clearTimeout(cur._timer);
   pendingSearch.delete(key);
 }
-
-// ───────────────────────── Components V2 helpers ─────────────────────────
 
 function sep(spacing = 1, divider = true) {
   return { type: 14, divider, spacing };
@@ -285,7 +275,6 @@ function container(components, accentColor = BLACK) {
   return { type: 17, accent_color: accentColor, components };
 }
 
-// emoji ใน component ต้องเป็น object เสมอ (string ล้วนจะโดน API ปฏิเสธ)
 function emo(e) {
   return typeof e === "string" ? { name: e } : e;
 }
@@ -320,8 +309,6 @@ function safeTitle(t, max = 70) {
     .trim()
     .slice(0, max);
 }
-
-// ───────────────────────── UI builders ─────────────────────────
 
 function buildPlayerCard(queue, song) {
   const durationSec = Math.floor((song.durationMs || 0) / 1000);
@@ -477,8 +464,6 @@ function buildSetupContainer() {
   ], BLACK);
 }
 
-// ───────────────────────── Card management ─────────────────────────
-
 async function getCardChannel(queue) {
   if (LOG_CHANNEL_ID) {
     const ch = await client.channels.fetch(LOG_CHANNEL_ID).catch(() => null);
@@ -548,8 +533,6 @@ function startProgressUpdater(queue) {
   }, 5000);
 }
 
-// ───────────────────────── yt-dlp / search ─────────────────────────
-
 function getYtdlpInfo(url) {
   return new Promise((resolve) => {
     if (!YTDLP_CMD) return resolve(null);
@@ -604,8 +587,10 @@ async function searchTracks(query, requester) {
       };
     }
 
-    const result = await yts(query);
-    const videos = result.videos.slice(0, 30);
+    const pick = (r) => (r?.videos || []).filter((v) => v.seconds > 0);
+    let videos = pick(await yts({ query, hl: "th", gl: "TH", category: "music" }).catch(() => null));
+    if (!videos.length) videos = pick(await yts({ query, hl: "th", gl: "TH" }));
+    videos = videos.slice(0, 30);
     if (!videos.length) return { type: "search", tracks: [] };
 
     return {
@@ -627,11 +612,6 @@ async function searchTracks(query, requester) {
   }
 }
 
-/**
- * สร้างสตรีม PCM (s16le 48k stereo) จาก yt-dlp → ffmpeg
- * ใช้ PCM เพื่อให้ปรับ volume ได้จริง (inlineVolume ใช้ได้กับ Raw เท่านั้น)
- * คืน { stream, cleanup }  /  onFail(err) ถูกเรียกเมื่อสตรีมพังจริง
- */
 function createYtdlpStream(url, onFail) {
   if (!YTDLP_CMD || !FFMPEG_CMD) throw new Error("yt-dlp หรือ ffmpeg ไม่พร้อมใช้งาน");
 
@@ -683,7 +663,6 @@ function createYtdlpStream(url, onFail) {
   ytdlp.on("error", (e) => fail(new Error(`yt-dlp spawn error: ${e.message}`)));
   ffmpeg.on("error", (e) => fail(new Error(`ffmpeg spawn error: ${e.message}`)));
 
-  // อ่าน stderr ทั้งสองตัว (เดิมทิ้งหมดเลยไม่เห็น error)
   ytdlp.stderr.on("data", (d) => {
     const s = d.toString();
     errTail = (errTail + s).slice(-1000);
@@ -693,8 +672,6 @@ function createYtdlpStream(url, onFail) {
 
   ytdlp.stdout.pipe(ffmpeg.stdin);
 
-  // timeout เฉพาะตอนเริ่ม: ถ้าไม่มีข้อมูลก้อนแรกใน 60 วิ ถือว่าพัง
-  // (ห้ามทำ stall timer ตลอดเพลง เพราะ backpressure ทำให้ data หยุดไหลปกติ)
   startupTimer = setTimeout(() => fail(new Error("หมดเวลารอข้อมูลเสียงจาก yt-dlp (60s)")), STARTUP_TIMEOUT);
   ytdlp.stdout.on("data", (c) => {
     bytes += c.length;
@@ -716,13 +693,11 @@ function createYtdlpStream(url, onFail) {
   ffmpeg.on("close", (code) => {
     if (cleaned) return;
     if (code !== 0 && code !== null) fail(new Error(`ffmpeg exited with code ${code}`));
-    else cleanup(); // จบปกติ เก็บกวาด process
+    else cleanup(); 
   });
 
   return { stream: ffmpeg.stdout, cleanup };
 }
-
-// ───────────────────────── Playback ─────────────────────────
 
 function explainError(msg) {
   const m = String(msg || "");
@@ -746,14 +721,12 @@ async function shutdown(guildId, queue = queues.get(guildId)) {
   if (queues.get(guildId) === queue) queues.delete(guildId);
 }
 
-// เพลงพัง: retry เพลงเดิม 1 ครั้ง → ถ้ายังพังข้ามไปเพลงถัดไป → ไม่มีเพลงอื่นก็ปิด
 function failTrack(guildId, queue, song, err) {
   if (queues.get(guildId) !== queue || queue.stopped) return;
 
   const reason = explainError(err?.message);
   console.error(`❌ เล่นไม่ได้: ${song?.title} — ${err?.message}`);
 
-  // แจ้งในห้องแชทเฉพาะตอนพังจริง (หลัง retry แล้ว) ไม่แจ้งซ้ำสองรอบ
   if (queue._retried && queue.textChannel) {
     queue.textChannel.send({
       flags: FLAGS.V2,
@@ -832,8 +805,6 @@ function attachPlayerEvents(guildId, player, connection) {
   queue.player     = player;
   queue.connection = connection;
 
-  // Watchdog: ถ้าเคย Ready แล้วหลุดไป connecting/signalling แล้วไม่กลับมาใน 15 วิ
-  // → ลอง rejoin 1 ครั้ง → ถ้ายังไม่กลับมา ปิดคิวและลบการ์ด (กันการ์ดค้างตอน player autopaused)
   let voiceWatchdog = null;
   let wasReady = false;
   let rejoinTried = false;
@@ -907,7 +878,6 @@ function attachPlayerEvents(guildId, player, connection) {
     refreshCard(queue);
   });
 
-  // error ของ player จะตามด้วย Idle เสมอ → แค่จดไว้ แล้วให้ Idle เป็นคนตัดสินใจ (กันเดินคิวซ้ำสองรอบ)
   player.on("error", (err) => {
     console.error("❌ Player error:", err.message);
     if (!queue._pendingError) queue._pendingError = { song: queue.current, err };
@@ -920,7 +890,6 @@ function attachPlayerEvents(guildId, player, connection) {
 
     if (queue.stopped) return;
 
-    // กด prev / jump
     if (queue._jumping) {
       queue._jumping = false;
       queue._pendingError = null;
@@ -929,7 +898,6 @@ function attachPlayerEvents(guildId, player, connection) {
       return;
     }
 
-    // เพลงพัง
     if (queue._pendingError) {
       const { song, err } = queue._pendingError;
       queue._pendingError = null;
@@ -969,16 +937,12 @@ function attachPlayerEvents(guildId, player, connection) {
     queue.connection = null;
     queue.resource   = null;
     queue.clear();
-    // กันลบ queue ใหม่ที่เพิ่งสร้างหลังจากอันเก่าถูก destroy
     if (queues.get(guildId) === queue) queues.delete(guildId);
   });
 
   connection.subscribe(player);
 }
 
-// ───────────────────────── Voice join ─────────────────────────
-
-// คืน queue เมื่อ connection ถึงสถานะ Ready แล้วเท่านั้น / ถ้าไม่สำเร็จ throw Error (ข้อความภาษาไทยแสดงผู้ใช้ได้)
 async function joinVoiceFromInteraction(interaction) {
   const voiceChannel = interaction.member?.voice?.channel;
   if (!voiceChannel) throw new Error("คุณต้องอยู่ใน Voice Channel ก่อน!");
@@ -996,7 +960,7 @@ async function joinVoiceFromInteraction(interaction) {
       channelId     : voiceChannel.id,
       guildId       : interaction.guildId,
       adapterCreator: interaction.guild.voiceAdapterCreator,
-      selfDeaf      : false,
+      selfDeaf      : true,
       selfMute      : false,
     });
 
@@ -1015,7 +979,6 @@ async function joinVoiceFromInteraction(interaction) {
   return queue;
 }
 
-// เพิ่มเพลงเข้าคิว แล้วเริ่มเล่นถ้า player ว่างอยู่ (เช็คจากสถานะ player จริง ไม่ใช่ isPlaying ที่เป็น false ตอน pause)
 async function enqueueAndPlay(guildId, queue, song) {
   queue.add(song);
   const idle = queue.player?.state.status === AudioPlayerStatus.Idle;
@@ -1028,8 +991,6 @@ async function enqueueAndPlay(guildId, queue, song) {
   refreshCard(queue);
   return "queued";
 }
-
-// ───────────────────────── Commands ─────────────────────────
 
 const commands = [
   new SlashCommandBuilder()
@@ -1056,7 +1017,6 @@ function buildModal(customId, title, label, placeholder) {
   return modal;
 }
 
-// Discord แปลงชื่อห้องข้อความเป็นตัวพิมพ์เล็กและเปลี่ยนเว้นวรรคเป็น "-" ต้องเทียบแบบนี้ ไม่งั้นสร้างซ้ำทุกครั้ง
 const normText = (n) => n.toLowerCase().replace(/\s+/g, "-");
 
 async function handleSetup(interaction) {
@@ -1116,8 +1076,6 @@ async function handleSetup(interaction) {
   }
 }
 
-// ───────────────────────── Interactions ─────────────────────────
-
 async function onInteraction(interaction) {
   const guildId = interaction.guildId;
   if (!guildId) return;
@@ -1126,7 +1084,6 @@ async function onInteraction(interaction) {
     return handleSetup(interaction);
   }
 
-  // ─── เลือกเพลงจาก dropdown ───
   if (interaction.isStringSelectMenu() && interaction.customId === "search_select") {
     const key     = pKey(guildId, interaction.user.id);
     const pending = pendingSearch.get(key);
@@ -1154,7 +1111,6 @@ async function onInteraction(interaction) {
 
     clearPendingSearch(key);
 
-    // copy ออกมา กัน object เดียวกันถูกใส่คิวซ้ำแล้วชนกัน
     const song = { ...picked, requester: interaction.user.id };
     const result = await enqueueAndPlay(guildId, queue, song);
     return interaction.editReply(editCard(
@@ -1164,7 +1120,6 @@ async function onInteraction(interaction) {
     ));
   }
 
-  // ─── ปุ่ม ───
   if (interaction.isButton()) {
     const { customId } = interaction;
 
@@ -1193,7 +1148,6 @@ async function onInteraction(interaction) {
       return interaction.reply({ content: "- `❌` **ไม่มีเพลงเล่นอยู่**", flags: MessageFlags.Ephemeral });
     }
 
-    // ต้องอยู่ห้องเสียงเดียวกับบอทถึงจะควบคุมได้
     const userVc = interaction.member?.voice?.channelId;
     if (!userVc || userVc !== queue.connection?.joinConfig.channelId) {
       return interaction.reply({ content: "- `❌` **ต้องอยู่ในห้องเสียงเดียวกับบอทถึงจะควบคุมได้**", flags: MessageFlags.Ephemeral });
@@ -1218,14 +1172,14 @@ async function onInteraction(interaction) {
       if (queue.player.state.status === AudioPlayerStatus.Idle) {
         return ephemeral("- `❌` **ไม่มีเพลงกำลังเล่นอยู่**");
       }
-      queue._forceNext = true; // ข้ามจริงแม้เปิดลูปเพลงเดียวอยู่
+      queue._forceNext = true; 
       queue.player.stop(true);
       return ephemeral("⏭️ ข้ามแล้ว!");
     }
 
     if (customId === "music_prev") {
       if (queue.currentIdx <= 0) return ephemeral("- `❌` **ไม่มีเพลงก่อนหน้า**");
-      queue._restoreLoop = queue.loop; // ปิดลูปเดี่ยวชั่วคราว แล้วคืนค่าหลังเริ่มเพลง
+      queue._restoreLoop = queue.loop; 
       queue.loop = false;
       queue.currentIdx -= 1;
       if (queue.player.state.status === AudioPlayerStatus.Idle) {
@@ -1277,7 +1231,6 @@ async function onInteraction(interaction) {
     return;
   }
 
-  // ─── Modal ค้นหา ───
   if (interaction.isModalSubmit() && interaction.customId === "setup_search") {
     const inputVal = interaction.fields.getTextInputValue("input").trim();
 
@@ -1338,8 +1291,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 });
 
-// ───────────────────────── Process ─────────────────────────
-
 process.on("unhandledRejection", (r) => console.error("UnhandledRejection:", r));
 process.on("uncaughtException", (e) => {
   if (e && (e.code === "EPIPE" || e.code === "ENOENT")) {
@@ -1357,10 +1308,25 @@ async function gracefulExit(sig) {
   process.exit(0);
 }
 process.on("SIGINT",  () => gracefulExit("SIGINT"));
-process.on("SIGTERM", () => gracefulExit("SIGTERM")); // Railway ส่ง SIGTERM ตอน redeploy
+process.on("SIGTERM", () => gracefulExit("SIGTERM")); 
+
+function updatePresence() {
+  if (!client.user) return;
+  const servers = client.guilds.cache.size;
+  const members = client.guilds.cache.reduce((sum, g) => sum + (g.memberCount || 0), 0);
+  client.user.setPresence({
+    status: "online",
+    activities: [{
+      name: `${servers} servers | ${members} members`,
+      type: ActivityType.Listening,
+    }],
+  });
+}
 
 client.once(Events.ClientReady, async (c) => {
   console.log(`\n🎵  ${c.user.tag} พร้อมใช้งานแล้ว!`);
+  updatePresence();
+  setInterval(updatePresence, 5 * 60 * 1000); 
   try {
     await registerCommands();
   } catch (e) {
