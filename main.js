@@ -131,7 +131,11 @@ const COOKIES_PATH = resolveCookiesPath();
 console.log(`🍪 cookies : ${COOKIES_PATH ? "ใช้งาน" : "ไม่มี"}`);
 
 function ytdlpBaseArgs() {
-  const args = ["--no-warnings", "--no-playlist", "--no-cache-dir", "--no-progress"];
+  // ไม่ใส่ --no-warnings เพื่อให้เห็นคำเตือนของ yt-dlp ใน log (เช่น ไม่มี JS runtime)
+  // --js-runtimes node: YouTube ต้องใช้ JS runtime แก้โจทย์ (yt-dlp เปิดแค่ deno เป็นค่าเริ่มต้น)
+  // ปิดได้ด้วยตั้ง YTDLP_NO_JS_RUNTIME=1
+  const args = ["--no-playlist", "--no-cache-dir", "--no-progress"];
+  if (!process.env.YTDLP_NO_JS_RUNTIME) args.push("--js-runtimes", "node");
   if (COOKIES_PATH) args.push("--cookies", COOKIES_PATH);
   if (process.env.YTDLP_PROXY) args.push("--proxy", process.env.YTDLP_PROXY);
   if (process.env.YTDLP_EXTRA_ARGS) args.push(...process.env.YTDLP_EXTRA_ARGS.split(/\s+/).filter(Boolean));
@@ -749,7 +753,8 @@ function failTrack(guildId, queue, song, err) {
   const reason = explainError(err?.message);
   console.error(`❌ เล่นไม่ได้: ${song?.title} — ${err?.message}`);
 
-  if (queue.textChannel) {
+  // แจ้งในห้องแชทเฉพาะตอนพังจริง (หลัง retry แล้ว) ไม่แจ้งซ้ำสองรอบ
+  if (queue._retried && queue.textChannel) {
     queue.textChannel.send({
       flags: FLAGS.V2,
       components: [msgCard(`❌ **เล่นเพลงไม่ได้**\n🎵 **${song?.title ?? "?"}**\n-# \`${reason.slice(0, 300)}\``)],
